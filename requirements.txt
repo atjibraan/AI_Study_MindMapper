@@ -6,4 +6,5 @@ keybert
 spacy
 nltk
 networkx
-pyvis
+pyvis==0.3.1
+
