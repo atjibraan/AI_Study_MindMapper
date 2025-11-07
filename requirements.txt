@@ -1,0 +1,9 @@
+streamlit
+PyPDF2
+transformers
+torch
+keybert
+spacy
+nltk
+networkx
+pyvis
