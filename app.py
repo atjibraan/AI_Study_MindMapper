@@ -1,8 +1,7 @@
 # ======================================================
 # 🧠 AI Study MindMapper
 # Smart Notes Summarizer + Mindmap Generator + MCQ Creator
-# Author: Jibraan & ChatGPT
-# ======================================================
+=============================
 
 import streamlit as st
 import PyPDF2
