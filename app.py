@@ -1,7 +1,7 @@
-# ======================================================
+
 # 🧠 AI Study MindMapper
 # Smart Notes Summarizer + Mindmap Generator + MCQ Creator
-=============================
+
 
 import streamlit as st
 import PyPDF2
