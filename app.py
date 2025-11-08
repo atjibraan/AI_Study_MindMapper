@@ -12,8 +12,7 @@ from PyPDF2 import PdfReader
 # 🧠 Setup
 # ----------------------------
 st.set_page_config(page_title="AI Study MindMapper", layout="wide")
-device = "cpu"
-st.info(f"✅ Device set to use {device}")
+st.info("✅ Device set to use CPU")
 
 nltk.download('punkt', quiet=True)
 
@@ -23,8 +22,8 @@ nltk.download('punkt', quiet=True)
 @st.cache_resource
 def load_models():
     summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device=-1)
-    mcq_model = AutoModelForSeq2SeqLM.from_pretrained("iarfmoose/t5-base-question-generator")
-    tokenizer = AutoTokenizer.from_pretrained("iarfmoose/t5-base-question-generator")
+    mcq_model = AutoModelForSeq2SeqLM.from_pretrained("valhalla/t5-small-qg-prepend")
+    tokenizer = AutoTokenizer.from_pretrained("valhalla/t5-small-qg-prepend")
     kw_model = KeyBERT()
     nlp = spacy.load("en_core_web_sm")
     return summarizer, mcq_model, tokenizer, kw_model, nlp
@@ -45,7 +44,6 @@ def extract_text(file):
     else:
         return file.read().decode("utf-8")
 
-# ✅ Improved summarizer: dynamically adjusts max/min length
 def summarize_text(text):
     """Adaptive summarization using BART."""
     chunks = nltk.tokenize.sent_tokenize(text)
@@ -53,11 +51,8 @@ def summarize_text(text):
     for i in range(0, len(chunks), 5):
         input_chunk = " ".join(chunks[i:i+5])
         input_length = len(input_chunk.split())
-
-        # Dynamically set max/min length to avoid warnings
         max_len = max(60, min(0.7 * input_length, 200))
         min_len = max(25, min(0.3 * input_length, 80))
-
         summary = summarizer(
             input_chunk,
             max_length=int(max_len),
@@ -65,7 +60,6 @@ def summarize_text(text):
             do_sample=False
         )
         summaries.append(summary[0]['summary_text'])
-
     return " ".join(summaries)
 
 def extract_keywords(text, kw_model):
@@ -83,13 +77,13 @@ def create_mindmap(keywords, output_path):
 
     net = Network(height="600px", width="100%", bgcolor="#ffffff", font_color="black")
     net.from_nx(G)
-    net.write_html(output_path)  # ✅ fixed safe HTML export
+    net.write_html(output_path)
     return output_path
 
-# ✅ Improved MCQ generator
+# ✅ New Stable MCQ generator using valhalla/t5-small-qg-prepend
 def generate_mcqs(text, tokenizer, model):
-    """Generate meaningful MCQs using T5."""
-    input_text = "generate questions: " + text[:800]  # use more content for better results
+    """Generate meaningful MCQs using T5-small question generation model."""
+    input_text = "generate questions: " + text[:800]
     inputs = tokenizer.encode(input_text, return_tensors="pt", max_length=512, truncation=True)
 
     outputs = model.generate(
@@ -101,7 +95,6 @@ def generate_mcqs(text, tokenizer, model):
     )
 
     mcqs = [tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
-    # clean duplicates or short nonsense lines
     mcqs = list(set([q.strip() for q in mcqs if len(q.split()) > 4]))
     return mcqs[:5]
 
@@ -144,10 +137,9 @@ if uploaded_file is not None:
             for i, q in enumerate(mcqs, 1):
                 st.write(f"**Q{i}.** {q}")
         else:
-            st.warning("⚠️ Couldn’t generate MCQs — try uploading a longer or more informative PDF.")
+            st.warning("⚠️ Couldn’t generate MCQs — try uploading a longer or more detailed PDF.")
 
     st.success("✅ Mindmap and Smart Notes generated successfully!")
 
 else:
     st.info("👆 Upload a PDF or TXT file to get started!")
-
