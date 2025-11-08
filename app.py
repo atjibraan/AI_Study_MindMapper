@@ -39,12 +39,20 @@ def load_models():
                             min_length=30,
                             max_length=150)
         kw_model = KeyBERT()
-        return summarizer, kw_model
+        
+        # Load question-answering model for the new feature
+        qa_pipeline = pipeline(
+            "question-answering",
+            model="distilbert-base-cased-distilled-squad",
+            tokenizer="distilbert-base-cased"
+        )
+        
+        return summarizer, kw_model, qa_pipeline
     except Exception as e:
         st.error(f"Model loading error: {e}")
-        return None, None
+        return None, None, None
 
-summarizer, kw_model = load_models()
+summarizer, kw_model, qa_pipeline = load_models()
 
 # ----------------------------
 # 📄 Math-Specific Functions
@@ -211,6 +219,35 @@ def generate_domain_questions(text, concepts, math_elements):
     return questions[:6]  # Return max 6 questions
 
 # ----------------------------
+# 🆕 NEW FEATURE: Question Answering
+# ----------------------------
+def answer_user_question(question, context_text):
+    """Answer user's question based on the document content."""
+    try:
+        if not question.strip():
+            return "Please enter a question."
+        
+        if not context_text.strip():
+            return "No document content available. Please upload a document first."
+        
+        # Use the QA pipeline to find the answer
+        result = qa_pipeline(
+            question=question,
+            context=context_text[:4000]  # Limit context length for performance
+        )
+        
+        answer = result['answer']
+        confidence = result['score']
+        
+        if confidence > 0.1:  # Reasonable confidence threshold
+            return f"**Answer:** {answer}\n\n*Confidence: {confidence:.2f}*"
+        else:
+            return "I couldn't find a clear answer to your question in the document. Try rephrasing or asking about specific concepts mentioned in the text."
+    
+    except Exception as e:
+        return f"Error processing your question: {str(e)}"
+
+# ----------------------------
 # 📄 Enhanced Utility Functions
 # ----------------------------
 def extract_text(file):
@@ -342,9 +379,14 @@ st.write("Convert study material into **Smart Notes, Mindmaps, and Questions** w
 
 uploaded_file = st.file_uploader("📁 Upload PDF or Text File", type=["pdf", "txt"])
 
+# Initialize session state for document text
+if 'document_text' not in st.session_state:
+    st.session_state.document_text = ""
+
 if uploaded_file is not None:
     with st.spinner("Processing your document..."):
         text = extract_text(uploaded_file)
+        st.session_state.document_text = text  # Store text for Q&A
         
         if not text.strip():
             st.error("No text could be extracted. Please try a different file.")
@@ -400,12 +442,27 @@ if uploaded_file is not None:
             else:
                 st.warning("Could not generate mindmap visualization")
 
-            # Questions
+            # Auto-generated Questions
             st.subheader("📝 Generated Questions")
             questions = generate_domain_questions(summary, concepts, math_elements)
             
             for i, q in enumerate(questions, 1):
                 st.write(f"**Q{i}.** {q}")
+
+            # 🆕 NEW FEATURE: User Question Answering
+            st.subheader("❓ Ask Your Own Question")
+            st.write("Ask any question about the document content:")
+            
+            user_question = st.text_input(
+                "Enter your question:",
+                placeholder="e.g., What is the main topic? Explain key concepts..."
+            )
+            
+            if user_question:
+                with st.spinner("Finding answer..."):
+                    answer = answer_user_question(user_question, text)
+                    st.success("Answer Found!")
+                    st.info(answer)
 
     st.success("✅ Processing completed!")
 
@@ -417,13 +474,19 @@ else:
 # ----------------------------
 with st.expander("🔧 Supported Features by Content Type"):
     st.markdown("""
-    | Content Type | Equation Detection | Concept Mapping | Specialized Questions |
-    |-------------|-------------------|-----------------|---------------------|
-    | **Mathematics** | ✅ Basic equations | ✅ Math concepts | ✅ Domain-specific |
-    | **Science** | ✅ Basic patterns | ✅ Science topics | ✅ Context-aware |
-    | **Computer Science** | ❌ | ✅ CS concepts | ✅ Application-focused |
-    | **General Text** | ❌ | ✅ General keywords | ✅ Standard questions |
+    | Content Type | Equation Detection | Concept Mapping | Specialized Questions | Q&A Support |
+    |-------------|-------------------|-----------------|---------------------|-------------|
+    | **Mathematics** | ✅ Basic equations | ✅ Math concepts | ✅ Domain-specific | ✅ |
+    | **Science** | ✅ Basic patterns | ✅ Science topics | ✅ Context-aware | ✅ |
+    | **Computer Science** | ❌ | ✅ CS concepts | ✅ Application-focused | ✅ |
+    | **General Text** | ❌ | ✅ General keywords | ✅ Standard questions | ✅ |
+    
+    ### 🆕 New Feature: Interactive Q&A
+    - **Ask any question** about your uploaded document
+    - **Get instant answers** based on the document content
+    - **AI-powered responses** using advanced question-answering
+    - **Works with all content types** - Math, Science, CS, and General Text
     """)
 
 st.markdown("---")
-st.markdown("Enhanced with mathematical content awareness | Equation detection | Concept mapping")
+st.markdown("Enhanced with mathematical content awareness | Equation detection | Concept mapping | Interactive Q&A")
