@@ -10,13 +10,21 @@ from PyPDF2 import PdfReader
 import tempfile
 
 # ----------------------------
-# 🧠 Setup
+# 🧠 Setup & NLTK Download
 # ----------------------------
 st.set_page_config(page_title="AI Study MindMapper", layout="wide")
 device = "cpu"
 st.info(f"✅ Device set to use {device}")
 
-nltk.download('punkt', quiet=True)
+# Download required NLTK data with error handling
+@st.cache_resource
+def download_nltk_data():
+    try:
+        nltk.download('punkt', quiet=True)
+        nltk.download('punkt_tab', quiet=True)
+    except Exception as e:
+        st.warning(f"⚠️ NLTK download issue: {e}. Using alternative tokenization.")
+download_nltk_data()
 
 # Load NLP models once
 @st.cache_resource
@@ -77,14 +85,25 @@ def extract_text(file):
         st.error(f"❌ Error extracting text: {str(e)}")
         return ""
 
+def simple_sentence_split(text):
+    """Fallback sentence splitting if NLTK fails."""
+    import re
+    # Basic sentence splitting by punctuation
+    sentences = re.split(r'[.!?]+', text)
+    return [s.strip() for s in sentences if s.strip()]
+
 def summarize_text(text, max_len=130):
     """Summarize long text using BART."""
     try:
         if len(text.strip()) < 100:
             return text
             
-        # Split into sentences
-        sentences = nltk.tokenize.sent_tokenize(text)
+        # Try NLTK sentence tokenization first, then fallback
+        try:
+            sentences = nltk.tokenize.sent_tokenize(text)
+        except Exception as e:
+            st.warning("⚠️ NLTK tokenization failed, using basic sentence splitting.")
+            sentences = simple_sentence_split(text)
         
         # If text is short, return as is
         if len(sentences) <= 3:
@@ -99,25 +118,35 @@ def summarize_text(text, max_len=130):
             if len(current_chunk + sentence) < chunk_size:
                 current_chunk += sentence + " "
             else:
-                chunks.append(current_chunk.strip())
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
                 current_chunk = sentence + " "
         
-        if current_chunk:
+        if current_chunk.strip():
             chunks.append(current_chunk.strip())
         
         summaries = []
-        for chunk in chunks[:4]:  # Limit to first 4 chunks to avoid timeout
+        for i, chunk in enumerate(chunks[:4]):  # Limit to first 4 chunks to avoid timeout
             try:
-                summary = summarizer(chunk, max_length=max_len, min_length=30, do_sample=False)
-                summaries.append(summary[0]['summary_text'])
+                if len(chunk) > 50:  # Only summarize substantial chunks
+                    summary = summarizer(chunk, max_length=max_len, min_length=30, do_sample=False)
+                    summaries.append(summary[0]['summary_text'])
+                    st.write(f"✅ Processed chunk {i+1}/{min(len(chunks), 4)}")
             except Exception as e:
-                st.warning(f"⚠️ Could not summarize one chunk: {e}")
+                st.warning(f"⚠️ Could not summarize chunk {i+1}: {e}")
+                # Use first 100 chars of chunk as fallback
                 summaries.append(chunk[:100] + "...")
         
-        return " ".join(summaries) if summaries else text[:500]
+        result = " ".join(summaries) if summaries else text[:500]
+        return result
     except Exception as e:
         st.error(f"❌ Error in summarization: {str(e)}")
-        return text[:500]
+        # Return a simple summary by taking first few sentences
+        try:
+            sentences = simple_sentence_split(text)
+            return " ".join(sentences[:3])
+        except:
+            return text[:500]
 
 def extract_keywords(text, top_n=8):
     """Extract key terms using multiple methods."""
@@ -137,9 +166,14 @@ def extract_keywords(text, top_n=8):
             return [kw[0] for kw in keywords]
         else:
             # Basic keyword extraction fallback
-            words = nltk.word_tokenize(text.lower())
+            try:
+                words = nltk.word_tokenize(text.lower())
+            except:
+                # Basic word splitting if tokenization fails
+                words = text.lower().split()
             words = [word for word in words if word.isalpha() and len(word) > 3]
-            freq_dist = nltk.FreqDist(words)
+            from collections import Counter
+            freq_dist = Counter(words)
             return [word for word, freq in freq_dist.most_common(top_n)]
     except Exception as e:
         st.error(f"❌ Error extracting keywords: {str(e)}")
@@ -200,7 +234,8 @@ def create_mindmap(keywords, output_path):
 def generate_mcqs_fallback(text, num_questions=3):
     """Fallback MCQ generation using pattern-based approach."""
     try:
-        sentences = nltk.sent_tokenize(text)
+        # Use our simple sentence splitter
+        sentences = simple_sentence_split(text)
         questions = []
         
         for sentence in sentences[:num_questions]:
@@ -208,20 +243,30 @@ def generate_mcqs_fallback(text, num_questions=3):
             if len(words) > 5:  # Only use substantial sentences
                 # Simple question generation pattern
                 if "is" in sentence.lower():
-                    question = f"What {sentence.split('is')[0]}is?"
+                    parts = sentence.lower().split('is')
+                    if len(parts) > 1 and len(parts[0].split()) < 6:
+                        question = f"What is {parts[1].split('.')[0].strip()}?"
+                        questions.append(question)
                 elif "are" in sentence.lower():
-                    question = f"What {sentence.split('are')[0]}are?"
-                else:
-                    question = f"What is the significance of: {sentence[:100]}?"
-                questions.append(question)
+                    parts = sentence.lower().split('are')
+                    if len(parts) > 1 and len(parts[0].split()) < 6:
+                        question = f"What are {parts[1].split('.')[0].strip()}?"
+                        questions.append(question)
+                elif len(questions) < num_questions:
+                    question = f"What is the significance of: {sentence[:80]}?"
+                    questions.append(question)
         
-        return questions if questions else [
+        # Ensure we have enough questions
+        while len(questions) < num_questions:
+            questions.append(f"Question {len(questions)+1}: What key concept did you learn from this material?")
+        
+        return questions[:num_questions]
+    except Exception as e:
+        return [
             "What is the main topic discussed?",
             "What are the key points mentioned?",
             "How does this information relate to the overall subject?"
         ]
-    except Exception as e:
-        return ["What is the main idea presented in the text?"]
 
 def generate_mcqs(text, tokenizer, model, num_questions=3):
     """Generate MCQs using T5 model if available, else use fallback."""
@@ -280,17 +325,20 @@ if uploaded_file is not None:
 
             # Summarization
             st.subheader("🧠 Smart Notes (Summarized Content)")
-            summary = summarize_text(text)
+            with st.spinner("Generating summary..."):
+                summary = summarize_text(text)
             st.write(summary)
 
             # Keywords + Mindmap
             st.subheader("🗺️ Mindmap Visualization")
-            keywords = extract_keywords(summary)
+            with st.spinner("Extracting keywords..."):
+                keywords = extract_keywords(summary)
             st.write("**Top Keywords:**", ", ".join(keywords))
 
             # Create output directory
             os.makedirs("output", exist_ok=True)
-            mindmap_path = create_mindmap(keywords, "output/mindmap.html")
+            with st.spinner("Creating mindmap..."):
+                mindmap_path = create_mindmap(keywords, "output/mindmap.html")
 
             if mindmap_path and os.path.exists(mindmap_path):
                 with open(mindmap_path, "r", encoding="utf-8") as f:
@@ -310,7 +358,8 @@ if uploaded_file is not None:
 
             # MCQs
             st.subheader("📝 Auto-generated MCQs")
-            mcqs = generate_mcqs(summary, tokenizer, mcq_model)
+            with st.spinner("Generating practice questions..."):
+                mcqs = generate_mcqs(summary, tokenizer, mcq_model)
             for i, q in enumerate(mcqs, 1):
                 st.write(f"**Q{i}.** {q}")
 
@@ -350,4 +399,4 @@ with st.expander("ℹ️ How to use this app & System Status"):
 
 # Footer
 st.markdown("---")
-st.markdown("Built with Streamlit, Transformers, and NetworkX | Fallback modes ensure robust operation")
+st.markdown("Built with Streamlit, Transformers, and NetworkX | Robust fallback modes included")
