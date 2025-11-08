@@ -3,7 +3,7 @@ import os
 import nltk
 import networkx as nx
 from pyvis.network import Network
-from transformers import pipeline, Conversation
+from transformers import pipeline
 from keybert import KeyBERT
 from PyPDF2 import PdfReader
 import re
@@ -43,7 +43,7 @@ def load_models():
         
         # Load conversational model for interactive Q&A
         conversational_pipeline = pipeline(
-            "conversational",
+            "text-generation",
             model="microsoft/DialoGPT-medium",
             tokenizer="microsoft/DialoGPT-medium"
         )
@@ -229,6 +229,9 @@ def initialize_conversation():
     
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
+    
+    if 'chat_context' not in st.session_state:
+        st.session_state.chat_context = ""
 
 def add_message(role, message):
     """Add a message to the conversation history."""
@@ -242,29 +245,60 @@ def add_message(role, message):
 def get_conversational_response(user_input, document_context=""):
     """Get a conversational response using the dialogue model."""
     try:
-        # Create conversation context
+        # Build conversation history for context
+        chat_history = st.session_state.chat_history[-4:]  # Last 4 messages for context
+        context_lines = []
+        
+        for chat in chat_history:
+            if chat['role'] == 'user':
+                context_lines.append(f"User: {chat['message']}")
+            else:
+                context_lines.append(f"Assistant: {chat['message']}")
+        
+        history_context = "\n".join(context_lines)
+        
+        # Create the prompt with context
         if document_context:
-            context = f"Based on this study material: {document_context[:1000]}. "
+            prompt = f"""Based on this study material: {document_context[:500]}
+
+Previous conversation:
+{history_context}
+
+User: {user_input}
+Assistant:"""
         else:
-            context = ""
+            prompt = f"""Previous conversation:
+{history_context}
+
+User: {user_input}
+Assistant:"""
         
-        # Add context to user input
-        enhanced_input = context + user_input
-        
-        # Create conversation object
-        conversation = Conversation(enhanced_input)
-        
-        # Get response from conversational model
-        result = conversational_pipeline(
-            conversation,
-            max_length=1000,
+        # Generate response
+        response = conversational_pipeline(
+            prompt,
+            max_length=500,
+            num_return_sequences=1,
+            temperature=0.7,
+            do_sample=True,
             pad_token_id=conversational_pipeline.tokenizer.eos_token_id
         )
         
-        return result.generated_responses[-1]
+        # Extract the generated text
+        generated_text = response[0]['generated_text']
+        
+        # Extract only the assistant's response (after the last "Assistant:")
+        if "Assistant:" in generated_text:
+            assistant_response = generated_text.split("Assistant:")[-1].strip()
+        else:
+            assistant_response = generated_text.split(prompt)[-1].strip() if prompt in generated_text else generated_text
+        
+        # Clean up the response
+        assistant_response = assistant_response.split("User:")[0].split("Assistant:")[0].strip()
+        
+        return assistant_response if assistant_response else "I'm here to help you understand the study material better. Could you rephrase your question?"
     
     except Exception as e:
-        return f"I apologize, but I'm having trouble generating a response right now. Error: {str(e)}"
+        return f"I apologize, but I'm having trouble generating a response right now. Please try asking your question in a different way."
 
 def get_smart_response(user_input, document_text, content_type):
     """Smart response system that combines multiple approaches."""
@@ -284,6 +318,10 @@ def get_smart_response(user_input, document_text, content_type):
         # How questions
         "how to study math effectively": "Great question! Here are some tips: 1) Practice regularly with different problems, 2) Understand concepts rather than memorizing, 3) Connect math to real-world applications, 4) Don't be afraid to make mistakes - they're learning opportunities, 5) Break complex problems into smaller steps!",
         "how does this relate to real life": "Mathematics is everywhere! Algebra helps with budgeting and planning, geometry with design and construction, statistics with data analysis, and calculus with understanding change in systems like population growth or object motion!",
+        
+        # General study questions
+        "what should i focus on": "Based on the material, focus on understanding the key concepts and how they connect. Pay attention to definitions, formulas, and problem-solving methods. Practice applying the concepts to different types of problems!",
+        "how can i understand this better": "Try breaking down complex concepts into smaller parts. Relate them to things you already know, and don't hesitate to ask follow-up questions. Practice is key to building understanding!",
     }
     
     # Check knowledge base first
@@ -571,6 +609,11 @@ if uploaded_file is not None:
                     add_message('assistant', response)
                     st.rerun()
 
+            # Clear chat button
+            if st.button("Clear Conversation", type="secondary"):
+                st.session_state.chat_history = []
+                st.rerun()
+
     st.success("✅ Processing completed!")
 
 else:
@@ -587,6 +630,7 @@ with st.expander("🔧 Features"):
     - **Smart responses** - Answers "why", "how", and "what" questions
     - **Quick suggestions** - Pre-built questions to get you started
     - **Real-time chat** - See the conversation history
+    - **Clear conversation** - Start fresh when needed
     
     **Now you can ask questions like:**
     - "Why should I study algebra?"
