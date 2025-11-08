@@ -8,3 +8,4 @@ keybert>=0.8.0
 PyPDF2>=3.0.0
 sentencepiece>=0.1.99
 torch>=2.0.0
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.0/en_core_web_sm-3.7.0-py3-none-any.whl
