@@ -1,145 +1,123 @@
 import streamlit as st
-import os
-import nltk
-import spacy
-import networkx as nx
-from pyvis.network import Network
-from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
 from keybert import KeyBERT
+import spacy
+from spacy.cli import download
 from PyPDF2 import PdfReader
+import random
 
 # ----------------------------
-# 🧠 Setup
-# ----------------------------
-st.set_page_config(page_title="AI Study MindMapper", layout="wide")
-st.info("✅ Device set to use CPU")
-
-nltk.download('punkt', quiet=True)
-
-# ----------------------------
-# Load NLP Models
+# ⚙️ Load Models (cached for speed)
 # ----------------------------
 @st.cache_resource
 def load_models():
-    summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device=-1)
+    summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+
     mcq_model = AutoModelForCausalLM.from_pretrained("distilgpt2")
     tokenizer = AutoTokenizer.from_pretrained("distilgpt2")
+
     kw_model = KeyBERT()
-    nlp = spacy.load("en_core_web_sm")
+
+    # ✅ Fix: Auto-download SpaCy model if missing
+    try:
+        nlp = spacy.load("en_core_web_sm")
+    except OSError:
+        download("en_core_web_sm")
+        nlp = spacy.load("en_core_web_sm")
+
     return summarizer, mcq_model, tokenizer, kw_model, nlp
+
 
 summarizer, mcq_model, tokenizer, kw_model, nlp = load_models()
 
 # ----------------------------
 # 📄 Utility Functions
 # ----------------------------
-def extract_text(file):
-    """Extract text from uploaded PDF or TXT."""
-    if file.type == "application/pdf":
-        pdf_reader = PdfReader(file)
-        text = ""
-        for page in pdf_reader.pages:
-            text += page.extract_text() or ""
-        return text
-    else:
-        return file.read().decode("utf-8")
+def extract_text_from_pdf(pdf_file):
+    reader = PdfReader(pdf_file)
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() or ""
+    return text.strip()
 
-def summarize_text(text):
-    """Adaptive summarization using BART."""
-    chunks = nltk.tokenize.sent_tokenize(text)
-    summaries = []
-    for i in range(0, len(chunks), 5):
-        input_chunk = " ".join(chunks[i:i+5])
-        input_length = len(input_chunk.split())
-        max_len = max(60, min(0.7 * input_length, 200))
-        min_len = max(25, min(0.3 * input_length, 80))
-        summary = summarizer(
-            input_chunk,
-            max_length=int(max_len),
-            min_length=int(min_len),
-            do_sample=False
-        )
-        summaries.append(summary[0]['summary_text'])
-    return " ".join(summaries)
 
-def extract_keywords(text, kw_model):
-    """Extract key terms using KeyBERT."""
-    keywords = kw_model.extract_keywords(text, top_n=10, stop_words='english')
+def summarize_text(text, max_length=150):
+    input_length = len(text.split())
+    adjusted_length = min(max_length, max(60, input_length // 2))
+    summary = summarizer(text, max_length=adjusted_length, min_length=40, do_sample=False)
+    return summary[0]["summary_text"]
+
+
+def generate_keywords(text, kw_model):
+    keywords = kw_model.extract_keywords(text, top_n=10)
     return [kw[0] for kw in keywords]
 
-def create_mindmap(keywords, output_path):
-    """Create and save interactive mindmap."""
-    G = nx.Graph()
-    for word in keywords:
-        G.add_node(word)
-    for i in range(len(keywords) - 1):
-        G.add_edge(keywords[i], keywords[i + 1])
 
-    net = Network(height="600px", width="100%", bgcolor="#ffffff", font_color="black")
-    net.from_nx(G)
-    net.write_html(output_path)
-    return output_path
+def generate_mcqs(text, keywords, n=5):
+    mcqs = []
+    sentences = [sent.text for sent in nlp(text).sents]
 
-def generate_mcqs(summary, tokenizer, model):
-    """Generate pseudo-MCQs using GPT-2 (no SentencePiece needed)."""
-    prompt = f"Generate 5 multiple-choice questions based on the following text:\n{summary}\nQuestions:\n"
-    input_ids = tokenizer.encode(prompt, return_tensors="pt")
+    for i, kw in enumerate(keywords[:n]):
+        sentence = random.choice(sentences)
+        question = sentence.replace(kw, "______")
+        if "______" not in question:
+            continue
 
-    output = model.generate(
-        input_ids,
-        max_length=300,
-        temperature=0.8,
-        num_return_sequences=1,
-        pad_token_id=tokenizer.eos_token_id
-    )
+        distractors = random.sample(keywords, min(3, len(keywords)))
+        if kw in distractors:
+            distractors.remove(kw)
+        options = distractors + [kw]
+        random.shuffle(options)
 
-    text_output = tokenizer.decode(output[0], skip_special_tokens=True)
-    mcqs = text_output.split("\n")
-    mcqs = [q.strip() for q in mcqs if len(q.split()) > 5]
-    return mcqs[:5]
+        mcqs.append({
+            "question": question,
+            "options": options,
+            "answer": kw
+        })
+    return mcqs
+
 
 # ----------------------------
-# 🚀 Streamlit UI
+# 🎨 Streamlit App UI
 # ----------------------------
-st.title("🧩 AI Study MindMapper")
-st.write(
-    "Convert your **study chapters or notes** into concise **Smart Notes**, "
-    "**Interactive Mindmaps**, and **Auto-Generated MCQs** — built for students and teachers."
-)
+st.set_page_config(page_title="AI Study MindMapper", layout="wide")
 
-uploaded_file = st.file_uploader("📁 Upload PDF or Text File", type=["pdf", "txt"])
+st.title("🧠 AI Study MindMapper")
+st.markdown("Upload your study PDF — get a **smart summary**, **key topics**, and **auto-generated MCQs**!")
 
-if uploaded_file is not None:
-    with st.spinner("🔍 Extracting and processing text..."):
-        text = extract_text(uploaded_file)
+uploaded_file = st.file_uploader("📘 Upload your study material (PDF only)", type=["pdf"])
 
-        # --- Smart Notes ---
-        st.subheader("🧠 Smart Notes (Summarized Content)")
-        summary = summarize_text(text)
+if uploaded_file:
+    with st.spinner("Extracting text from PDF..."):
+        text = extract_text_from_pdf(uploaded_file)
+
+    if len(text) < 200:
+        st.warning("⚠️ The uploaded PDF doesn't contain enough text for summarization.")
+    else:
+        st.success("✅ Text successfully extracted!")
+
+        with st.spinner("Summarizing the content..."):
+            summary = summarize_text(text)
+
+        st.subheader("📄 Summary")
         st.write(summary)
 
-        # --- Mindmap ---
-        st.subheader("🗺️ Mindmap Visualization")
-        keywords = extract_keywords(summary, kw_model)
-        st.write("**Top Keywords:**", ", ".join(keywords))
+        with st.spinner("Extracting important keywords..."):
+            keywords = generate_keywords(summary, kw_model)
 
-        os.makedirs("output", exist_ok=True)
-        mindmap_path = create_mindmap(keywords, "output/mindmap.html")
+        st.subheader("🔑 Key Topics")
+        st.write(", ".join(keywords))
 
-        with open(mindmap_path, "r", encoding="utf-8") as f:
-            html_code = f.read()
-        st.components.v1.html(html_code, height=600, scrolling=True)
+        with st.spinner("Generating multiple choice questions..."):
+            mcqs = generate_mcqs(summary, keywords)
 
-        # --- MCQs ---
-        st.subheader("📝 Auto-generated MCQs")
-        mcqs = generate_mcqs(summary, tokenizer, mcq_model)
-        if mcqs:
-            for i, q in enumerate(mcqs, 1):
-                st.write(f"**Q{i}.** {q}")
-        else:
-            st.warning("⚠️ Couldn’t generate MCQs — try uploading a longer or more detailed PDF.")
-
-    st.success("✅ Mindmap and Smart Notes generated successfully!")
+        st.subheader("❓ Auto-Generated MCQs")
+        for i, mcq in enumerate(mcqs, 1):
+            st.markdown(f"**Q{i}.** {mcq['question']}")
+            for opt in mcq['options']:
+                st.markdown(f"- {opt}")
+            st.markdown(f"**Answer:** ✅ {mcq['answer']}")
+            st.markdown("---")
 
 else:
-    st.info("👆 Upload a PDF or TXT file to get started!")
+    st.info("👆 Please upload a PDF file to get started.")
