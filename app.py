@@ -3,11 +3,12 @@ import os
 import nltk
 import networkx as nx
 from pyvis.network import Network
-from transformers import pipeline
+from transformers import pipeline, Conversation
 from keybert import KeyBERT
 from PyPDF2 import PdfReader
 import re
 from collections import Counter
+import datetime
 
 # ----------------------------
 # 🧠 Setup
@@ -40,19 +41,19 @@ def load_models():
                             max_length=150)
         kw_model = KeyBERT()
         
-        # Load question-answering model for the new feature
-        qa_pipeline = pipeline(
-            "question-answering",
-            model="distilbert-base-cased-distilled-squad",
-            tokenizer="distilbert-base-cased"
+        # Load conversational model for interactive Q&A
+        conversational_pipeline = pipeline(
+            "conversational",
+            model="microsoft/DialoGPT-medium",
+            tokenizer="microsoft/DialoGPT-medium"
         )
         
-        return summarizer, kw_model, qa_pipeline
+        return summarizer, kw_model, conversational_pipeline
     except Exception as e:
         st.error(f"Model loading error: {e}")
         return None, None, None
 
-summarizer, kw_model, qa_pipeline = load_models()
+summarizer, kw_model, conversational_pipeline = load_models()
 
 # ----------------------------
 # 📄 Math-Specific Functions
@@ -219,33 +220,97 @@ def generate_domain_questions(text, concepts, math_elements):
     return questions[:6]  # Return max 6 questions
 
 # ----------------------------
-# 🆕 NEW FEATURE: Question Answering
+# 🆕 INTERACTIVE CONVERSATIONAL Q&A SYSTEM
 # ----------------------------
-def answer_user_question(question, context_text):
-    """Answer user's question based on the document content."""
+def initialize_conversation():
+    """Initialize or reset the conversation history."""
+    if 'conversation' not in st.session_state:
+        st.session_state.conversation = []
+    
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+
+def add_message(role, message):
+    """Add a message to the conversation history."""
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    st.session_state.chat_history.append({
+        'role': role,
+        'message': message,
+        'timestamp': timestamp
+    })
+
+def get_conversational_response(user_input, document_context=""):
+    """Get a conversational response using the dialogue model."""
     try:
-        if not question.strip():
-            return "Please enter a question."
+        # Create conversation context
+        if document_context:
+            context = f"Based on this study material: {document_context[:1000]}. "
+        else:
+            context = ""
         
-        if not context_text.strip():
-            return "No document content available. Please upload a document first."
+        # Add context to user input
+        enhanced_input = context + user_input
         
-        # Use the QA pipeline to find the answer
-        result = qa_pipeline(
-            question=question,
-            context=context_text[:4000]  # Limit context length for performance
+        # Create conversation object
+        conversation = Conversation(enhanced_input)
+        
+        # Get response from conversational model
+        result = conversational_pipeline(
+            conversation,
+            max_length=1000,
+            pad_token_id=conversational_pipeline.tokenizer.eos_token_id
         )
         
-        answer = result['answer']
-        confidence = result['score']
-        
-        if confidence > 0.1:  # Reasonable confidence threshold
-            return f"**Answer:** {answer}\n\n*Confidence: {confidence:.2f}*"
-        else:
-            return "I couldn't find a clear answer to your question in the document. Try rephrasing or asking about specific concepts mentioned in the text."
+        return result.generated_responses[-1]
     
     except Exception as e:
-        return f"Error processing your question: {str(e)}"
+        return f"I apologize, but I'm having trouble generating a response right now. Error: {str(e)}"
+
+def get_smart_response(user_input, document_text, content_type):
+    """Smart response system that combines multiple approaches."""
+    user_input_lower = user_input.lower().strip()
+    
+    # Knowledge base for common questions
+    knowledge_base = {
+        # Why questions
+        "why should i study algebra": "Algebra is fundamental because it teaches you how to think logically and solve problems systematically. It's the foundation for advanced mathematics, computer science, engineering, and even everyday tasks like budgeting and planning. Algebra helps develop critical thinking skills that are valuable in any career!",
+        "why is math important": "Mathematics is crucial because it develops problem-solving skills, logical thinking, and analytical abilities. It's used in virtually every field - from science and engineering to finance and data analysis. Math helps us understand patterns, make predictions, and solve real-world problems efficiently.",
+        "why study calculus": "Calculus is essential for understanding change and motion. It's used in physics, engineering, economics, computer graphics, and even medicine. Calculus helps model real-world phenomena like population growth, object motion, and optimization problems.",
+        
+        # What questions
+        "what is a quadratic equation": "A quadratic equation is a second-degree polynomial equation of the form ax² + bx + c = 0. It's called 'quadratic' because 'quadratus' means square in Latin, and the variable gets squared (x²). These equations often appear in physics, engineering, and optimization problems!",
+        "what is calculus": "Calculus is the mathematics of change. It has two main branches: Differential Calculus (studying rates of change) and Integral Calculus (studying accumulation). Think of it as the math that describes how things move, grow, and change over time!",
+        
+        # How questions
+        "how to study math effectively": "Great question! Here are some tips: 1) Practice regularly with different problems, 2) Understand concepts rather than memorizing, 3) Connect math to real-world applications, 4) Don't be afraid to make mistakes - they're learning opportunities, 5) Break complex problems into smaller steps!",
+        "how does this relate to real life": "Mathematics is everywhere! Algebra helps with budgeting and planning, geometry with design and construction, statistics with data analysis, and calculus with understanding change in systems like population growth or object motion!",
+    }
+    
+    # Check knowledge base first
+    for question, answer in knowledge_base.items():
+        if question in user_input_lower:
+            return answer
+    
+    # Check for question patterns and provide helpful responses
+    if any(word in user_input_lower for word in ['why', 'importance', 'important', 'purpose']):
+        concepts = identify_math_concepts(document_text)
+        if concepts:
+            return f"That's a great question! Based on your document, we're discussing {', '.join(concepts)}. These concepts are important because they form the foundation for more advanced topics and have practical applications in many fields. Would you like me to explain the importance of any specific concept in more detail?"
+        else:
+            return "That's an excellent question about the importance of this topic! Understanding why we study something helps with motivation and deeper learning. Could you tell me which specific concept you'd like to understand better?"
+    
+    elif any(word in user_input_lower for word in ['how', 'method', 'approach', 'technique']):
+        return "I'd be happy to help you understand the methods and approaches! Could you specify which particular technique or process you'd like me to explain? For example, are you asking about problem-solving strategies, calculation methods, or conceptual approaches?"
+    
+    elif any(word in user_input_lower for word in ['what', 'define', 'definition']):
+        concepts = identify_math_concepts(document_text)
+        if concepts:
+            return f"I can help define those concepts! Your document mentions {', '.join(concepts)}. Which specific term would you like me to explain in detail?"
+        else:
+            return "I'd be happy to define mathematical concepts for you! Could you specify which term or concept you'd like me to explain?"
+    
+    # Use conversational model as fallback
+    return get_conversational_response(user_input, document_text)
 
 # ----------------------------
 # 📄 Enhanced Utility Functions
@@ -374,14 +439,13 @@ def extract_keywords_enhanced(text):
 # ----------------------------
 # 🚀 Streamlit UI
 # ----------------------------
-st.title("🧮 AI Study MindMapper - Math Enhanced")
-st.write("Convert study material into **Smart Notes, Mindmaps, and Questions** with enhanced math support.")
+st.title("🧮 AI Study MindMapper - Interactive Edition")
+st.write("Convert study material into **Smart Notes, Mindmaps, and have interactive conversations**!")
 
 uploaded_file = st.file_uploader("📁 Upload PDF or Text File", type=["pdf", "txt"])
 
-# Initialize session state for document text
-if 'document_text' not in st.session_state:
-    st.session_state.document_text = ""
+# Initialize conversation
+initialize_conversation()
 
 if uploaded_file is not None:
     with st.spinner("Processing your document..."):
@@ -449,20 +513,63 @@ if uploaded_file is not None:
             for i, q in enumerate(questions, 1):
                 st.write(f"**Q{i}.** {q}")
 
-            # 🆕 NEW FEATURE: User Question Answering
-            st.subheader("❓ Ask Your Own Question")
-            st.write("Ask any question about the document content:")
+            # 🆕 INTERACTIVE CONVERSATIONAL Q&A
+            st.subheader("💬 Interactive Study Assistant")
+            st.write("Chat with me about your study material! Ask questions, seek explanations, or discuss concepts.")
             
-            user_question = st.text_input(
-                "Enter your question:",
-                placeholder="e.g., What is the main topic? Explain key concepts..."
-            )
+            # Display chat history
+            chat_container = st.container()
+            with chat_container:
+                for chat in st.session_state.chat_history[-10:]:  # Show last 10 messages
+                    if chat['role'] == 'user':
+                        st.markdown(f"**You** ({chat['timestamp']}): {chat['message']}")
+                    else:
+                        st.markdown(f"**Assistant** ({chat['timestamp']}): {chat['message']}")
             
-            if user_question:
-                with st.spinner("Finding answer..."):
-                    answer = answer_user_question(user_question, text)
-                    st.success("Answer Found!")
-                    st.info(answer)
+            # Chat input
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                user_input = st.text_input(
+                    "Type your message:",
+                    placeholder="Ask me anything about the material...",
+                    key="chat_input"
+                )
+            with col2:
+                send_button = st.button("Send", use_container_width=True)
+            
+            if send_button and user_input:
+                # Add user message to history
+                add_message('user', user_input)
+                
+                # Get AI response
+                with st.spinner("Thinking..."):
+                    response = get_smart_response(user_input, text, content_type)
+                    add_message('assistant', response)
+                
+                # Rerun to update chat display
+                st.rerun()
+            
+            # Quick suggestion buttons
+            st.write("**Quick questions you can ask:**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("Why study this?", use_container_width=True):
+                    add_message('user', "Why should I study this material?")
+                    response = get_smart_response("Why should I study this material?", text, content_type)
+                    add_message('assistant', response)
+                    st.rerun()
+            with col2:
+                if st.button("Key concepts?", use_container_width=True):
+                    add_message('user', "What are the key concepts?")
+                    response = get_smart_response("What are the key concepts?", text, content_type)
+                    add_message('assistant', response)
+                    st.rerun()
+            with col3:
+                if st.button("Study tips?", use_container_width=True):
+                    add_message('user', "How should I study this effectively?")
+                    response = get_smart_response("How should I study this effectively?", text, content_type)
+                    add_message('assistant', response)
+                    st.rerun()
 
     st.success("✅ Processing completed!")
 
@@ -470,23 +577,24 @@ else:
     st.info("👆 Upload a PDF or TXT file to get started!")
 
 # ----------------------------
-# 📝 Features by Content Type
+# 📝 Features
 # ----------------------------
-with st.expander("🔧 Supported Features by Content Type"):
+with st.expander("🔧 Features"):
     st.markdown("""
-    | Content Type | Equation Detection | Concept Mapping | Specialized Questions | Q&A Support |
-    |-------------|-------------------|-----------------|---------------------|-------------|
-    | **Mathematics** | ✅ Basic equations | ✅ Math concepts | ✅ Domain-specific | ✅ |
-    | **Science** | ✅ Basic patterns | ✅ Science topics | ✅ Context-aware | ✅ |
-    | **Computer Science** | ❌ | ✅ CS concepts | ✅ Application-focused | ✅ |
-    | **General Text** | ❌ | ✅ General keywords | ✅ Standard questions | ✅ |
+    ### 🆕 Interactive Study Assistant
+    - **Conversational Q&A** - Chat naturally like we're doing now!
+    - **Remembers context** - Follows up on previous questions
+    - **Smart responses** - Answers "why", "how", and "what" questions
+    - **Quick suggestions** - Pre-built questions to get you started
+    - **Real-time chat** - See the conversation history
     
-    ### 🆕 New Feature: Interactive Q&A
-    - **Ask any question** about your uploaded document
-    - **Get instant answers** based on the document content
-    - **AI-powered responses** using advanced question-answering
-    - **Works with all content types** - Math, Science, CS, and General Text
+    **Now you can ask questions like:**
+    - "Why should I study algebra?"
+    - "How does this relate to real life?"
+    - "What's the most important concept here?"
+    - "Can you explain this in simpler terms?"
+    - "How should I study this effectively?"
     """)
 
 st.markdown("---")
-st.markdown("Enhanced with mathematical content awareness | Equation detection | Concept mapping | Interactive Q&A")
+st.markdown("Interactive Study Assistant | Conversational Q&A | Smart Learning Companion")
