@@ -1,17 +1,13 @@
 import streamlit as st
 import os
 import nltk
-import spacy
 import networkx as nx
 from pyvis.network import Network
 from transformers import pipeline
 from keybert import KeyBERT
 from PyPDF2 import PdfReader
-import tempfile
 import re
 from collections import Counter
-import sympy as sp
-import latex2sympy2
 
 # ----------------------------
 # 🧠 Setup
@@ -29,9 +25,8 @@ content_type = st.radio("Content Type:",
 def download_nltk_data():
     try:
         nltk.download('punkt', quiet=True)
-        nltk.download('punkt_tab', quiet=True)
     except:
-        pass
+        st.warning("NLTK punkt download failed - using fallback tokenization")
 
 download_nltk_data()
 
@@ -40,64 +35,83 @@ download_nltk_data()
 def load_models():
     try:
         summarizer = pipeline("summarization", 
-                            model="facebook/bart-large-cnn", 
-                            device=-1)
+                            model="facebook/bart-large-cnn",
+                            min_length=30,
+                            max_length=150)
         kw_model = KeyBERT()
-        
-        # Try to load spaCy
-        try:
-            nlp = spacy.load("en_core_web_sm")
-        except:
-            nlp = None
-            
-        return summarizer, kw_model, nlp
+        return summarizer, kw_model
     except Exception as e:
         st.error(f"Model loading error: {e}")
-        return None, None, None
+        return None, None
 
-summarizer, kw_model, nlp = load_models()
+summarizer, kw_model = load_models()
 
 # ----------------------------
 # 📄 Math-Specific Functions
 # ----------------------------
-def extract_math_formulas(text):
-    """Extract mathematical formulas and equations from text."""
-    # Pattern for basic math expressions
-    math_patterns = [
-        r'\$[^$]+\$',  # LaTeX inline math
-        r'\\\[.*?\\\]',  # LaTeX display math
-        r'\\\(.*?\\\)',  # LaTeX inline math
-        r'[A-Za-z]+\s*=\s*[^\.]+',  # Simple equations
-        r'[0-9+\-*/^()]+',  # Arithmetic expressions
+def extract_math_elements(text):
+    """Extract mathematical elements from text."""
+    math_elements = {
+        'equations': [],
+        'expressions': [],
+        'math_keywords': [],
+        'numbers': []
+    }
+    
+    # Patterns for math content
+    equation_pattern = r'[A-Za-z]+\s*=\s*[^\.\n]+'  # Simple equations like "x = y + z"
+    expression_pattern = r'[0-9+\-*/^()xyz]+'  # Math expressions
+    number_pattern = r'\b\d+\.?\d*\b'  # Numbers
+    
+    # Math vocabulary
+    math_vocab = [
+        'equation', 'formula', 'theorem', 'proof', 'solve', 'calculate', 'compute',
+        'algebra', 'calculus', 'geometry', 'trigonometry', 'statistics', 'probability',
+        'derivative', 'integral', 'limit', 'function', 'variable', 'constant',
+        'matrix', 'vector', 'graph', 'plot', 'angle', 'area', 'volume'
     ]
     
-    formulas = []
-    for pattern in math_patterns:
-        matches = re.findall(pattern, text)
-        formulas.extend(matches)
+    # Extract equations
+    equations = re.findall(equation_pattern, text)
+    math_elements['equations'] = [eq.strip() for eq in equations[:5]]
     
-    return formulas
+    # Extract math expressions
+    expressions = re.findall(expression_pattern, text)
+    # Filter to only keep meaningful expressions (not just single numbers)
+    meaningful_expr = [expr for expr in expressions if len(expr) > 2 and any(op in expr for op in ['+', '-', '*', '/', '^'])]
+    math_elements['expressions'] = meaningful_expr[:5]
+    
+    # Extract numbers
+    numbers = re.findall(number_pattern, text)
+    math_elements['numbers'] = list(set(numbers))[:10]  # Unique numbers only
+    
+    # Identify math keywords
+    text_lower = text.lower()
+    found_keywords = [word for word in math_vocab if word in text_lower]
+    math_elements['math_keywords'] = found_keywords
+    
+    return math_elements
 
 def identify_math_concepts(text):
     """Identify mathematical concepts and topics."""
-    math_keywords = {
-        'algebra': ['equation', 'variable', 'polynomial', 'quadratic', 'linear'],
-        'calculus': ['derivative', 'integral', 'limit', 'differentiation', 'integration'],
-        'geometry': ['triangle', 'circle', 'angle', 'area', 'volume'],
-        'trigonometry': ['sine', 'cosine', 'tangent', 'sin', 'cos', 'tan'],
-        'statistics': ['mean', 'median', 'mode', 'probability', 'distribution']
+    math_categories = {
+        'Algebra': ['equation', 'variable', 'polynomial', 'quadratic', 'linear', 'solve', 'factor'],
+        'Calculus': ['derivative', 'integral', 'limit', 'differentiation', 'integration', 'function'],
+        'Geometry': ['triangle', 'circle', 'angle', 'area', 'volume', 'shape', 'perimeter'],
+        'Trigonometry': ['sine', 'cosine', 'tangent', 'sin', 'cos', 'tan', 'trigonometry'],
+        'Statistics': ['mean', 'median', 'mode', 'probability', 'distribution', 'average', 'statistics']
     }
     
     found_concepts = []
     text_lower = text.lower()
     
-    for concept, keywords in math_keywords.items():
+    for category, keywords in math_categories.items():
         if any(keyword in text_lower for keyword in keywords):
-            found_concepts.append(concept)
+            found_concepts.append(category)
     
     return found_concepts
 
-def create_math_mindmap(keywords, formulas, concepts, output_path):
+def create_enhanced_mindmap(keywords, math_elements, concepts, output_path):
     """Create enhanced mindmap for mathematical content."""
     try:
         G = nx.Graph()
@@ -106,26 +120,27 @@ def create_math_mindmap(keywords, formulas, concepts, output_path):
         central_node = "Mathematics" if content_type == "Mathematics" else "Main Topic"
         G.add_node(central_node, size=30, color="#FF6B6B", font={'size': 25})
         
-        # Add formula nodes (different color)
-        for i, formula in enumerate(formulas[:5]):  # Limit to 5 formulas
-            formula_node = f"Formula_{i+1}"
-            G.add_node(formula_node, size=15, color="#9B59B6", title=formula)
-            G.add_edge(central_node, formula_node)
+        # Add equation nodes (different color)
+        for i, equation in enumerate(math_elements['equations'][:3]):
+            eq_node = f"Eq_{i+1}"
+            G.add_node(eq_node, size=15, color="#9B59B6", title=equation, shape='box')
+            G.add_edge(central_node, eq_node)
         
         # Add concept nodes
         for concept in concepts:
-            G.add_node(concept, size=20, color="#3498DB")
+            G.add_node(concept, size=20, color="#3498DB", shape='diamond')
             G.add_edge(central_node, concept)
         
         # Add keyword nodes
         for i, keyword in enumerate(keywords):
-            if keyword not in concepts:  # Avoid duplicates
+            if keyword not in concepts and keyword not in math_elements['math_keywords']:
                 G.add_node(keyword, size=18, color="#2ECC71")
                 G.add_edge(central_node, keyword)
-                
-                # Connect related concepts
-                if i > 0 and i % 2 == 0:
-                    G.add_edge(keywords[i-1], keyword)
+        
+        # Add math keyword nodes
+        for math_keyword in math_elements['math_keywords'][:5]:
+            G.add_node(math_keyword, size=16, color="#E74C3C", shape='triangle')
+            G.add_edge(central_node, math_keyword)
 
         net = Network(height="600px", width="100%", bgcolor="#ffffff", font_color="black")
         net.from_nx(G)
@@ -145,33 +160,55 @@ def create_math_mindmap(keywords, formulas, concepts, output_path):
         st.error(f"Mindmap creation error: {e}")
         return None
 
-def generate_math_questions(text, concepts):
-    """Generate math-related questions based on content."""
+def generate_domain_questions(text, concepts, math_elements):
+    """Generate domain-specific questions based on content."""
     questions = []
     
-    # Template-based question generation
-    question_templates = [
-        "Explain the concept of {concept} in your own words.",
-        "What is the importance of {concept} in mathematics?",
-        "How would you apply {concept} to solve real-world problems?",
-        "What are the key formulas related to {concept}?",
-        "Compare and contrast {concept} with similar mathematical concepts."
-    ]
+    if content_type == "Mathematics":
+        # Math-specific questions
+        for concept in concepts:
+            questions.extend([
+                f"Explain the concept of {concept.lower()} in your own words.",
+                f"What are the key principles of {concept.lower()}?",
+                f"How is {concept.lower()} applied in problem-solving?"
+            ])
+        
+        # Equation-based questions
+        for equation in math_elements['equations'][:2]:
+            questions.append(f"What does this equation represent: '{equation}'?")
+            questions.append(f"What variables are involved in: '{equation}'?")
     
-    for concept in concepts:
-        for template in question_templates[:2]:  # Use first 2 templates per concept
-            questions.append(template.format(concept=concept))
+    elif content_type == "Science":
+        # Science questions
+        science_questions = [
+            "What scientific principles are discussed?",
+            "How are experimental methods described?",
+            "What hypotheses or theories are presented?",
+            "How does this relate to real-world scientific applications?"
+        ]
+        questions.extend(science_questions)
     
-    # Add general math questions
-    general_questions = [
-        "What mathematical principles are discussed in this material?",
-        "How are formulas applied in the given context?",
-        "What problem-solving strategies are demonstrated?",
-        "How does this mathematical concept relate to other areas of math?"
-    ]
+    elif content_type == "Computer Science":
+        # CS questions
+        cs_questions = [
+            "What programming concepts or algorithms are mentioned?",
+            "How are computational problems approached?",
+            "What data structures or architectures are discussed?",
+            "How could these concepts be implemented in code?"
+        ]
+        questions.extend(cs_questions)
     
-    questions.extend(general_questions[:2])
-    return questions[:8]  # Return max 8 questions
+    else:
+        # General questions
+        general_questions = [
+            "What is the main topic discussed?",
+            "What are the key points mentioned?",
+            "How can you apply this knowledge?",
+            "What relationships exist between the main concepts?"
+        ]
+        questions.extend(general_questions)
+    
+    return questions[:6]  # Return max 6 questions
 
 # ----------------------------
 # 📄 Enhanced Utility Functions
@@ -193,63 +230,67 @@ def extract_text(file):
         st.error(f"Text extraction error: {e}")
         return ""
 
-def summarize_text(text, max_len=150):
-    """Enhanced summarization with math awareness."""
+def simple_sentence_split(text):
+    """Fallback sentence splitting if NLTK fails."""
+    sentences = re.split(r'[.!?]+', text)
+    return [s.strip() for s in sentences if s.strip()]
+
+def summarize_text(text):
+    """Enhanced summarization with domain awareness."""
     try:
         if len(text.strip()) < 100:
             return text
             
-        # For math content, preserve formulas and key concepts
-        if content_type == "Mathematics":
-            formulas = extract_math_formulas(text)
-            concepts = identify_math_concepts(text)
+        # Try NLTK sentence tokenization first, then fallback
+        try:
+            sentences = nltk.tokenize.sent_tokenize(text)
+        except:
+            sentences = simple_sentence_split(text)
+        
+        if len(sentences) <= 3:
+            return text
             
-            # Use smaller chunks for math content
-            sentences = nltk.sent_tokenize(text)
-            chunks = []
-            current_chunk = ""
-            
-            for sentence in sentences:
-                if len(current_chunk + sentence) < 300:  # Smaller chunks for math
-                    current_chunk += sentence + " "
-                else:
-                    if current_chunk.strip():
-                        chunks.append(current_chunk.strip())
-                    current_chunk = sentence + " "
-            
-            if current_chunk.strip():
-                chunks.append(current_chunk.strip())
-        else:
-            # Standard chunking for other content
-            sentences = nltk.sent_tokenize(text)
-            chunks = []
-            current_chunk = ""
-            
-            for sentence in sentences:
-                if len(current_chunk + sentence) < 500:
-                    current_chunk += sentence + " "
-                else:
-                    if current_chunk.strip():
-                        chunks.append(current_chunk.strip())
-                    current_chunk = sentence + " "
-            
-            if current_chunk.strip():
-                chunks.append(current_chunk.strip())
+        # Process in chunks
+        chunk_size = 400
+        chunks = []
+        current_chunk = ""
+        
+        for sentence in sentences:
+            if len(current_chunk + sentence) < chunk_size:
+                current_chunk += sentence + " "
+            else:
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence + " "
+        
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
         
         summaries = []
-        for chunk in chunks[:4]:
+        for chunk in chunks[:3]:
             try:
                 if len(chunk) > 50:
-                    summary = summarizer(chunk, max_length=max_len, min_length=40, do_sample=False)
+                    # Adjust max_length based on input length
+                    input_length = len(chunk.split())
+                    max_len = min(130, max(40, input_length // 2))
+                    
+                    summary = summarizer(
+                        chunk, 
+                        max_length=max_len, 
+                        min_length=30, 
+                        do_sample=False
+                    )
                     summaries.append(summary[0]['summary_text'])
             except Exception as e:
                 summaries.append(chunk[:100] + "...")
         
         result = " ".join(summaries) if summaries else text[:500]
         
-        # Add math context for math content
-        if content_type == "Mathematics" and concepts:
-            result += f"\n\nKey Mathematical Concepts: {', '.join(concepts)}"
+        # Add domain context
+        if content_type == "Mathematics":
+            concepts = identify_math_concepts(text)
+            if concepts:
+                result += f"\n\n**Mathematical Concepts:** {', '.join(concepts)}"
         
         return result
     except Exception as e:
@@ -260,9 +301,9 @@ def extract_keywords_enhanced(text):
     """Enhanced keyword extraction with domain awareness."""
     try:
         if content_type == "Mathematics":
-            # Extract math-specific keywords
+            # Extract math-specific elements
+            math_elements = extract_math_elements(text)
             concepts = identify_math_concepts(text)
-            formulas = extract_math_formulas(text)
             
             # Use KeyBERT for general keywords
             if kw_model is not None:
@@ -273,9 +314,9 @@ def extract_keywords_enhanced(text):
             else:
                 general_keywords = []
             
-            # Combine math concepts and general keywords
-            all_keywords = concepts + general_keywords
-            return list(dict.fromkeys(all_keywords))[:8]  # Remove duplicates, limit to 8
+            # Combine all elements
+            all_keywords = concepts + math_elements['math_keywords'] + general_keywords
+            return list(dict.fromkeys(all_keywords))[:8]  # Remove duplicates
         
         else:
             # Standard keyword extraction for other content
@@ -318,12 +359,9 @@ if uploaded_file is not None:
                         st.write("**Math Concepts:**", ", ".join(math_concepts) if math_concepts else "None detected")
                 
                 with col2:
-                    formulas = extract_math_formulas(text)
-                    st.write("**Formulas Found:**", len(formulas))
-                    if formulas:
-                        with st.expander("View Formulas"):
-                            for formula in formulas[:5]:  # Show first 5
-                                st.code(formula)
+                    math_elements = extract_math_elements(text)
+                    st.write("**Equations Found:**", len(math_elements['equations']))
+                    st.write("**Math Keywords:**", len(math_elements['math_keywords']))
 
             # Summarization
             st.subheader("🧠 Smart Notes")
@@ -335,35 +373,36 @@ if uploaded_file is not None:
             st.subheader("🗺️ Enhanced Mindmap")
             with st.spinner("Analyzing content..."):
                 keywords = extract_keywords_enhanced(text)
-                formulas = extract_math_formulas(text)
+                math_elements = extract_math_elements(text)
                 concepts = identify_math_concepts(text)
             
             st.write("**Key Elements:**", ", ".join(keywords))
-            if formulas:
-                st.write("**Formulas:**", f"Found {len(formulas)} mathematical expressions")
+            if math_elements['equations']:
+                st.write("**Equations:**", f"Found {len(math_elements['equations'])} mathematical equations")
 
             os.makedirs("output", exist_ok=True)
             with st.spinner("Creating interactive mindmap..."):
-                mindmap_path = create_math_mindmap(keywords, formulas, concepts, "output/mindmap.html")
+                mindmap_path = create_enhanced_mindmap(keywords, math_elements, concepts, "output/mindmap.html")
 
             if mindmap_path and os.path.exists(mindmap_path):
                 with open(mindmap_path, "r", encoding="utf-8") as f:
                     html_code = f.read()
                 st.components.v1.html(html_code, height=600, scrolling=True)
+                
+                # Download button
+                with open(mindmap_path, "rb") as f:
+                    st.download_button(
+                        label="📥 Download Mindmap",
+                        data=f,
+                        file_name="knowledge_mindmap.html",
+                        mime="text/html"
+                    )
             else:
                 st.warning("Could not generate mindmap visualization")
 
             # Questions
             st.subheader("📝 Generated Questions")
-            if content_type == "Mathematics":
-                questions = generate_math_questions(summary, concepts)
-            else:
-                questions = [
-                    "What is the main topic discussed?",
-                    "What are the key points mentioned?",
-                    "How can you apply this knowledge?",
-                    "What relationships exist between the main concepts?"
-                ]
+            questions = generate_domain_questions(summary, concepts, math_elements)
             
             for i, q in enumerate(questions, 1):
                 st.write(f"**Q{i}.** {q}")
@@ -378,13 +417,13 @@ else:
 # ----------------------------
 with st.expander("🔧 Supported Features by Content Type"):
     st.markdown("""
-    | Content Type | Formula Detection | Concept Mapping | Specialized Questions |
+    | Content Type | Equation Detection | Concept Mapping | Specialized Questions |
     |-------------|-------------------|-----------------|---------------------|
-    | **Mathematics** | ✅ Basic patterns | ✅ Math concepts | ✅ Template-based |
+    | **Mathematics** | ✅ Basic equations | ✅ Math concepts | ✅ Domain-specific |
     | **Science** | ✅ Basic patterns | ✅ Science topics | ✅ Context-aware |
-    | **Computer Science** | ✅ Code snippets | ✅ CS concepts | ✅ Application-focused |
+    | **Computer Science** | ❌ | ✅ CS concepts | ✅ Application-focused |
     | **General Text** | ❌ | ✅ General keywords | ✅ Standard questions |
     """)
 
 st.markdown("---")
-st.markdown("Enhanced with mathematical content awareness | Formula detection | Concept mapping")
+st.markdown("Enhanced with mathematical content awareness | Equation detection | Concept mapping")
