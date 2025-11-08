@@ -1,155 +1,153 @@
-
-# 🧠 AI Study MindMapper
-# Smart Notes Summarizer + Mindmap Generator + MCQ Creator
-
-
 import streamlit as st
-import PyPDF2
-from transformers import pipeline
-from keybert import KeyBERT
+import os
+import nltk
+import spacy
 import networkx as nx
 from pyvis.network import Network
-import nltk
-from nltk.corpus import wordnet
-import random
-import os
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+from keybert import KeyBERT
+from PyPDF2 import PdfReader
 
-# -----------------------------
-# 📦 Setup
-# -----------------------------
-nltk.download('wordnet', quiet=True)
-
+# ----------------------------
+# 🧠 Setup
+# ----------------------------
 st.set_page_config(page_title="AI Study MindMapper", layout="wide")
-st.title("🧠 AI Study MindMapper")
-st.write("Summarize study notes, visualize mindmaps, and generate MCQs using AI.")
+device = "cpu"
+st.info(f"✅ Device set to use {device}")
 
-# -----------------------------
-# 📂 Helper Functions
-# -----------------------------
-@st.cache_data
-def extract_text_from_pdf(uploaded_file):
-    """Extracts text from an uploaded PDF file"""
-    text = ""
-    try:
-        reader = PyPDF2.PdfReader(uploaded_file)
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    except Exception as e:
-        st.error(f"Error reading PDF: {e}")
-    return text
+nltk.download('punkt', quiet=True)
 
-
+# ----------------------------
+# Load NLP Models
+# ----------------------------
 @st.cache_resource
-def load_summarizer():
-    """Load the summarization model"""
-    return pipeline("summarization", model="facebook/bart-large-cnn")
+def load_models():
+    summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device=-1)
+    mcq_model = AutoModelForSeq2SeqLM.from_pretrained("iarfmoose/t5-base-question-generator")
+    tokenizer = AutoTokenizer.from_pretrained("iarfmoose/t5-base-question-generator")
+    kw_model = KeyBERT()
+    nlp = spacy.load("en_core_web_sm")
+    return summarizer, mcq_model, tokenizer, kw_model, nlp
 
+summarizer, mcq_model, tokenizer, kw_model, nlp = load_models()
 
-def summarize_text(text, summarizer, max_len=300):
-    """Summarize long text into concise notes"""
-    if len(text.split()) < 50:
+# ----------------------------
+# 📄 Utility Functions
+# ----------------------------
+def extract_text(file):
+    """Extract text from uploaded PDF or TXT."""
+    if file.type == "application/pdf":
+        pdf_reader = PdfReader(file)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() or ""
         return text
-    try:
-        summary = summarizer(text, max_length=max_len, min_length=80, do_sample=False)[0]['summary_text']
-        return summary
-    except Exception as e:
-        return f"⚠️ Summarization failed: {e}"
+    else:
+        return file.read().decode("utf-8")
 
+# ✅ Improved summarizer: dynamically adjusts max/min length
+def summarize_text(text):
+    """Adaptive summarization using BART."""
+    chunks = nltk.tokenize.sent_tokenize(text)
+    summaries = []
+    for i in range(0, len(chunks), 5):
+        input_chunk = " ".join(chunks[i:i+5])
+        input_length = len(input_chunk.split())
 
-@st.cache_resource
-def load_keybert():
-    """Load KeyBERT model"""
-    return KeyBERT()
+        # Dynamically set max/min length to avoid warnings
+        max_len = max(60, min(0.7 * input_length, 200))
+        min_len = max(25, min(0.3 * input_length, 80))
 
+        summary = summarizer(
+            input_chunk,
+            max_length=int(max_len),
+            min_length=int(min_len),
+            do_sample=False
+        )
+        summaries.append(summary[0]['summary_text'])
 
-def extract_keywords(text, kw_model, num_keywords=10):
-    """Extract top keyphrases from text"""
-    keywords = kw_model.extract_keywords(text, keyphrase_ngram_range=(1, 2), stop_words='english')
+    return " ".join(summaries)
+
+def extract_keywords(text, kw_model):
+    """Extract key terms using KeyBERT."""
+    keywords = kw_model.extract_keywords(text, top_n=10, stop_words='english')
     return [kw[0] for kw in keywords]
 
-
-def create_mindmap(keywords, output_path="mindmap.html"):
-    """Generate and save an interactive mindmap"""
+def create_mindmap(keywords, output_path):
+    """Create and save interactive mindmap."""
     G = nx.Graph()
-    G.add_node("Main Topic")
+    for word in keywords:
+        G.add_node(word)
+    for i in range(len(keywords) - 1):
+        G.add_edge(keywords[i], keywords[i + 1])
 
-    for kw in keywords:
-        G.add_node(kw)
-        G.add_edge("Main Topic", kw)
-
-    net = Network(notebook=False, height="600px", width="100%", bgcolor="#ffffff", font_color="black")
+    net = Network(height="600px", width="100%", bgcolor="#ffffff", font_color="black")
     net.from_nx(G)
-    net.show(output_path)
+    net.write_html(output_path)  # ✅ fixed safe HTML export
     return output_path
 
+# ✅ Improved MCQ generator
+def generate_mcqs(text, tokenizer, model):
+    """Generate meaningful MCQs using T5."""
+    input_text = "generate questions: " + text[:800]  # use more content for better results
+    inputs = tokenizer.encode(input_text, return_tensors="pt", max_length=512, truncation=True)
 
-def generate_mcqs(keywords):
-    """Generate basic MCQs from keywords"""
-    mcqs = []
-    for kw in keywords:
-        syns = wordnet.synsets(kw)
-        options = [kw]
-        if syns:
-            for s in syns[:3]:
-                lemma = s.lemmas()[0].name().replace('_', ' ')
-                if lemma.lower() != kw.lower():
-                    options.append(lemma)
-        while len(options) < 4:
-            options.append(f"Option{random.randint(1,100)}")
-        random.shuffle(options)
-        mcqs.append({
-            "question": f"What is related to **{kw}**?",
-            "options": options,
-            "answer": kw
-        })
-    return mcqs
+    outputs = model.generate(
+        inputs,
+        max_length=80,
+        num_beams=5,
+        num_return_sequences=5,
+        no_repeat_ngram_size=2
+    )
 
+    mcqs = [tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
+    # clean duplicates or short nonsense lines
+    mcqs = list(set([q.strip() for q in mcqs if len(q.split()) > 4]))
+    return mcqs[:5]
 
-# -----------------------------
-# 🧠 Main App Logic
-# -----------------------------
-uploaded_file = st.file_uploader("📘 Upload your study PDF file", type=["pdf"])
+# ----------------------------
+# 🚀 Streamlit UI
+# ----------------------------
+st.title("🧩 AI Study MindMapper")
+st.write(
+    "Convert your **study chapters or notes** into concise **Smart Notes**, "
+    "**Interactive Mindmaps**, and **Auto-Generated MCQs** — built for students and teachers."
+)
 
-if uploaded_file:
-    with st.spinner("Extracting text..."):
-        text = extract_text_from_pdf(uploaded_file)
+uploaded_file = st.file_uploader("📁 Upload PDF or Text File", type=["pdf", "txt"])
 
-    if len(text.strip()) == 0:
-        st.error("No readable text found in the PDF. Try another file.")
-    else:
-        st.success("✅ Text extracted successfully!")
+if uploaded_file is not None:
+    with st.spinner("🔍 Extracting and processing text..."):
+        text = extract_text(uploaded_file)
 
-        # Summarization
-        st.subheader("📄 Summarized Notes")
-        summarizer = load_summarizer()
-        summary = summarize_text(text, summarizer)
+        # --- Smart Notes ---
+        st.subheader("🧠 Smart Notes (Summarized Content)")
+        summary = summarize_text(text)
         st.write(summary)
 
-        # Keywords
-        st.subheader("🔑 Key Topics")
-        kw_model = load_keybert()
+        # --- Mindmap ---
+        st.subheader("🗺️ Mindmap Visualization")
         keywords = extract_keywords(summary, kw_model)
-        st.write(", ".join(keywords))
+        st.write("**Top Keywords:**", ", ".join(keywords))
 
-        # Mindmap
-        st.subheader("🧩 Mindmap Visualization")
         os.makedirs("output", exist_ok=True)
         mindmap_path = create_mindmap(keywords, "output/mindmap.html")
-        st.components.v1.html(open(mindmap_path, 'r', encoding='utf-8').read(), height=600)
 
-        # MCQs
-        st.subheader("📝 Auto-Generated MCQs")
-        mcqs = generate_mcqs(keywords)
-        for i, q in enumerate(mcqs):
-            st.markdown(f"**Q{i+1}. {q['question']}**")
-            for opt in q['options']:
-                st.markdown(f"- {opt}")
-            st.markdown(f"**Answer:** {q['answer']}")
-            st.markdown("---")
+        with open(mindmap_path, "r", encoding="utf-8") as f:
+            html_code = f.read()
+        st.components.v1.html(html_code, height=600, scrolling=True)
 
-        # Download Options
-        st.download_button("⬇️ Download Summary", summary, file_name="summary.txt")
+        # --- MCQs ---
+        st.subheader("📝 Auto-generated MCQs")
+        mcqs = generate_mcqs(summary, tokenizer, mcq_model)
+        if mcqs:
+            for i, q in enumerate(mcqs, 1):
+                st.write(f"**Q{i}.** {q}")
+        else:
+            st.warning("⚠️ Couldn’t generate MCQs — try uploading a longer or more informative PDF.")
+
+    st.success("✅ Mindmap and Smart Notes generated successfully!")
+
 else:
-    st.info("👆 Upload a PDF to get started.")
+    st.info("👆 Upload a PDF or TXT file to get started!")
+
