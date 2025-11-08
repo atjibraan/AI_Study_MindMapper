@@ -4,7 +4,7 @@ import nltk
 import spacy
 import networkx as nx
 from pyvis.network import Network
-from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
 from keybert import KeyBERT
 from PyPDF2 import PdfReader
 
@@ -22,8 +22,8 @@ nltk.download('punkt', quiet=True)
 @st.cache_resource
 def load_models():
     summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device=-1)
-    mcq_model = AutoModelForSeq2SeqLM.from_pretrained("valhalla/t5-small-qg-prepend")
-    tokenizer = AutoTokenizer.from_pretrained("valhalla/t5-small-qg-prepend")
+    mcq_model = AutoModelForCausalLM.from_pretrained("distilgpt2")
+    tokenizer = AutoTokenizer.from_pretrained("distilgpt2")
     kw_model = KeyBERT()
     nlp = spacy.load("en_core_web_sm")
     return summarizer, mcq_model, tokenizer, kw_model, nlp
@@ -80,22 +80,22 @@ def create_mindmap(keywords, output_path):
     net.write_html(output_path)
     return output_path
 
-# ✅ New Stable MCQ generator using valhalla/t5-small-qg-prepend
-def generate_mcqs(text, tokenizer, model):
-    """Generate meaningful MCQs using T5-small question generation model."""
-    input_text = "generate questions: " + text[:800]
-    inputs = tokenizer.encode(input_text, return_tensors="pt", max_length=512, truncation=True)
+def generate_mcqs(summary, tokenizer, model):
+    """Generate pseudo-MCQs using GPT-2 (no SentencePiece needed)."""
+    prompt = f"Generate 5 multiple-choice questions based on the following text:\n{summary}\nQuestions:\n"
+    input_ids = tokenizer.encode(prompt, return_tensors="pt")
 
-    outputs = model.generate(
-        inputs,
-        max_length=80,
-        num_beams=5,
-        num_return_sequences=5,
-        no_repeat_ngram_size=2
+    output = model.generate(
+        input_ids,
+        max_length=300,
+        temperature=0.8,
+        num_return_sequences=1,
+        pad_token_id=tokenizer.eos_token_id
     )
 
-    mcqs = [tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
-    mcqs = list(set([q.strip() for q in mcqs if len(q.split()) > 4]))
+    text_output = tokenizer.decode(output[0], skip_special_tokens=True)
+    mcqs = text_output.split("\n")
+    mcqs = [q.strip() for q in mcqs if len(q.split()) > 5]
     return mcqs[:5]
 
 # ----------------------------
